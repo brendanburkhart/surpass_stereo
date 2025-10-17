@@ -5,26 +5,39 @@ import json
 
 class SurpassStereo:
     def DIY(config):
-        diy_pipeline = lambda device: f"v4l2src device=/dev/video{device} ! image/jpeg,width=1920,height=1080,framerate=20/1 ! autovideoconvert ! appsink"
-        return SurpassStereo(diy_pipeline, config)
+        return SurpassStereo(config)
 
-    def __init__(self, gstreamer_pipeline, config):
-        self.left_camera = cv.VideoCapture(gstreamer_pipeline(0), cv.CAP_GSTREAMER)
-        self.right_camera = cv.VideoCapture(gstreamer_pipeline(1), cv.CAP_GSTREAMER)
+    def __init__(self, config):
+        self.left_camera = cv.VideoCapture(0, cv.CAP_V4L2)
+        self.right_camera = cv.VideoCapture(2, cv.CAP_V4L2)
 
-        self.left_camera.set(cv.CAP_PROP_EXPOSURE, 20)
-        self.right_camera.set(cv.CAP_PROP_EXPOSURE, 20)
+        default_exposure = 100
+        self.left_camera.set(cv.CAP_PROP_EXPOSURE, default_exposure)
+        self.right_camera.set(cv.CAP_PROP_EXPOSURE, default_exposure)
+
+        self.left_camera.set(cv.CAP_PROP_BUFFERSIZE, 1)
+        self.right_camera.set(cv.CAP_PROP_BUFFERSIZE, 1)
+
+        width = 1920
+        height = 1080
+
+        downsample = 1
+
+        self.left_camera.set(cv.CAP_PROP_FRAME_WIDTH, width//downsample)
+        self.left_camera.set(cv.CAP_PROP_FRAME_HEIGHT, height//downsample)
+        self.right_camera.set(cv.CAP_PROP_FRAME_WIDTH, width//downsample)
+        self.right_camera.set(cv.CAP_PROP_FRAME_HEIGHT, height//downsample)
 
         self.has_rectification = False
         if config is not None:
             self.has_rectification = True
-            self.left_intrinsic = np.array(config["left_camera"]["intrinsic"])
-            self.right_intrinsic = np.array(config["right_camera"]["intrinsic"])
+            self.left_intrinsic = np.array(config["left_camera"]["intrinsic"]) / downsample
+            self.right_intrinsic = np.array(config["right_camera"]["intrinsic"]) / downsample
 
             self.left_distortion = np.array(config["left_camera"]["distortion"])
             self.right_distortion = np.array(config["right_camera"]["distortion"])
 
-            original_image_size = (1920, 1080)
+            original_image_size = (1920//downsample, 1080//downsample)
 
             R1, R2, P1, P2, Q, _, _ = cv.stereoRectify(
                 self.left_intrinsic,
@@ -61,6 +74,7 @@ class SurpassStereo:
             min_depth = 0.04
             max_disparity = math.ceil(fx*b/min_depth)
             max_disparity = max_disparity - (max_disparity % 16) # required to be multiple of 16
+            print("Max disparity:", max_disparity)
 
             block_size = 7
             block_area = block_size * block_size
@@ -75,6 +89,10 @@ class SurpassStereo:
             self.wls_filter = cv.ximgproc.createDisparityWLSFilter(self.left_stereo_matcher)
             self.wls_filter.setLambda(8000.0)
             self.wls_filter.setSigmaColor(0.6)
+
+    def set_exposure(self, exposure):
+        self.left_camera.set(cv.CAP_PROP_EXPOSURE, exposure)
+        self.right_camera.set(cv.CAP_PROP_EXPOSURE, exposure)
 
     def compute_depth(self, left_image, right_image):
         left_gray = cv.cvtColor(left_image, cv.COLOR_RGB2GRAY)
@@ -95,10 +113,12 @@ class SurpassStereo:
 
         ok, left_raw = self.left_camera.retrieve()
         if not ok:
+            print("Failed to read left camera")
             return False, None, None
 
         ok, right_raw = self.right_camera.retrieve()
         if not ok:
+            print("Failed to read right camera")
             return False, None, None
 
         if self.has_rectification:
@@ -111,13 +131,17 @@ class SurpassStereo:
         return True, left_image, right_image
 
     def run(self):
+        cv.namedWindow("stereo", cv.WINDOW_NORMAL)
         while True:
             ok, left_image, right_image = self.read()
             if not ok:
                 print("!! Failed to read from stereo camera !!")
                 return
+            
+            combined = np.hstack((left_image, right_image))
+            cv.imshow("stereo", combined)
 
-            depth = self.compute_depth(left_image, right_image)
+            #depth = self.compute_depth(left_image, right_image)
             key = cv.waitKey(30)
             key = key & 0xFF # Upper bits are modifiers (control, alt, etc.)
             escape = 27
@@ -125,7 +149,8 @@ class SurpassStereo:
                 break
 
 def main():
-    with open("share/dvrk_calibration.json") as f:
+    config_file = "./share/diy_calibration.json"
+    with open(config_file, "r") as f:
         config = json.load(f)
 
     stereo = SurpassStereo.DIY(config)
